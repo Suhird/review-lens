@@ -2,6 +2,8 @@
 
 AI-powered consumer product review intelligence engine. Runs entirely on your local machine — no paid APIs required.
 
+Blog Post: https://suhird.me/blog/review-lens-ai-powered-review-intelligence
+
 ## What it does
 
 Type any product name and ReviewLens automatically:
