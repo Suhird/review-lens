@@ -1,6 +1,7 @@
 "use client";
 
-import { use } from "react";
+import { use, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useReportStream } from "@/hooks/useReportStream";
 import ProgressStream from "@/components/ProgressStream";
 import ScoreCard from "@/components/ScoreCard";
@@ -14,10 +15,36 @@ import VerdictSection from "@/components/VerdictSection";
 export default function ReportPage({
   params,
 }: {
-  params: Promise<{ jobId: string }>;
+  params: { jobId: string };
 }) {
-  const { jobId } = use(params);
+  const { jobId } = params;
   const { report, progress, isComplete, error } = useReportStream(jobId);
+  const router = useRouter();
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  const handleRefresh = async () => {
+    if (!report?.product_name || isRefreshing) return;
+    
+    setIsRefreshing(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${apiUrl}/api/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: report.product_name, use_cache: false }),
+      });
+
+      if (!res.ok) {
+        throw new Error(`Server error: ${res.status}`);
+      }
+
+      const data = await res.json();
+      router.push(`/report/${data.job_id}`);
+    } catch (err) {
+      console.error("Refresh failed:", err);
+      setIsRefreshing(false);
+    }
+  };
 
   if (error) {
     return (
@@ -40,21 +67,54 @@ export default function ReportPage({
   return (
     <div className="space-y-8">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <a href="/" className="text-blue-600 hover:text-blue-700 text-sm font-medium mb-2 inline-block">
-            ← New search
-          </a>
-          <h1 className="text-3xl font-bold text-slate-900">
-            {report?.product_name || "Analyzing..."}
-          </h1>
-          {report && (
-            <p className="text-slate-600 mt-1">
-              {report.total_reviews_analyzed} reviews analyzed from{" "}
-              {report.sources_used.join(", ")}
-            </p>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-6">
+          {report?.image_url && (
+            <div className="flex-shrink-0 w-24 h-24 bg-white rounded-xl border border-slate-200 overflow-hidden flex items-center justify-center p-2 shadow-sm">
+              <img 
+                src={report.image_url} 
+                alt={report.product_name || "Product image"} 
+                className="max-w-full max-h-full object-contain"
+              />
+            </div>
           )}
+          <div>
+            <div className="mb-2">
+              <a href="/" className="text-blue-600 hover:text-blue-700 text-sm font-medium inline-flex items-center">
+                ← New search
+              </a>
+            </div>
+            <h1 className="text-3xl font-bold text-slate-900">
+              {report?.product_name || "Analyzing..."}
+            </h1>
+            {report && (
+              <p className="text-slate-600 mt-1">
+                {report.total_reviews_analyzed} reviews analyzed from{" "}
+                {report.sources_used.join(", ")}
+              </p>
+            )}
+          </div>
         </div>
+        {/* Refresh Button Area */}
+        {isComplete && report && (
+          <div className="flex-shrink-0 mt-4 md:mt-0">
+            <button
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-slate-300 rounded-lg text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+            >
+              <svg 
+                className={`w-4 h-4 ${isRefreshing ? "animate-spin text-blue-500" : "text-slate-500"}`} 
+                fill="none" 
+                viewBox="0 0 24 24" 
+                stroke="currentColor"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+              {isRefreshing ? "Refreshing..." : "Refresh Data"}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Progress stream — always shown while running */}

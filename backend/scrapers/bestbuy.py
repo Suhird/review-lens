@@ -290,13 +290,12 @@ async def _scrape_with_playwright(query: str) -> list[RawReview]:
             content = await page.content()
             soup = BeautifulSoup(content, "lxml")
 
-            # Extract SKU directly from search results page HTML — avoids navigating to product page
-            # Best Buy embeds skuId in JSON blobs within the search results page
+            # Extract SKU directly from search results page HTML
             sku = _extract_sku_from_search_page(content, query)
+            product_link: Optional[str] = None
 
             if not sku:
                 # Fallback: get product link and extract SKU from its URL
-                product_link: Optional[str] = None
                 for sel in ["a.product-list-item-link", "h4.sku-title a", "h2.sku-title a"]:
                     for a in soup.select(sel):
                         href = a.get("href", "")
@@ -307,6 +306,17 @@ async def _scrape_with_playwright(query: str) -> list[RawReview]:
                     if sku or product_link:
                         break
 
+            # If we don't have a product link yet but we have a SKU, we need the link for the fallback
+            if sku and not product_link:
+                for sel in ["a.product-list-item-link", "h4.sku-title a", "h2.sku-title a"]:
+                    for a in soup.select(sel):
+                        href = a.get("href", "")
+                        if sku in href:
+                            product_link = href if href.startswith("http") else "https://www.bestbuy.com" + href
+                            break
+                    if product_link:
+                        break
+
             if sku:
                 logger.info(f"Best Buy: using UGC API for SKU {sku}")
                 api_reviews = await _fetch_reviews_via_api(sku, max_pages=3)
@@ -315,6 +325,24 @@ async def _scrape_with_playwright(query: str) -> list[RawReview]:
                 logger.warning(f"Best Buy: UGC API returned no reviews for SKU {sku}")
             else:
                 logger.warning("Best Buy: could not extract SKU from search results")
+            
+            # Robust Fallback: Navigate to the product page and scrape HTML
+            if product_link:
+                logger.info(f"Best Buy Playwright: Falling back to scraping product page HTML: {product_link}")
+                await page.goto(product_link, wait_until="domcontentloaded", timeout=45000)
+                await asyncio.sleep(_random_delay())
+                
+                prod_content = await page.content()
+                prod_soup = BeautifulSoup(prod_content, "lxml")
+                html_reviews = _parse_reviews_from_soup(prod_soup)
+                
+                if html_reviews:
+                    logger.info(f"Best Buy Playwright: scraped {len(html_reviews)} reviews from HTML")
+                    return html_reviews
+                else:
+                    logger.warning(f"Best Buy Playwright: HTML scraper found 0 reviews on {product_link}")
+            else:
+                logger.warning("Best Buy Playwright: Cannot try HTML fallback because no product link was found.")
 
         finally:
             await browser.close()

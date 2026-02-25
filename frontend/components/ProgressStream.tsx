@@ -1,16 +1,13 @@
 "use client";
 
 import { ProgressEntry } from "@/hooks/useReportStream";
+import { useEffect, useState } from "react";
 
-const STEPS = [
-  "Query Enrichment",
-  "Scraping Sources",
-  "Cleaning Reviews",
-  "Analyzing Sentiment",
-  "Detecting Fake Reviews",
-  "Analyzing Trends",
-  "Clustering Themes",
-  "Generating Report",
+const TASKS = [
+  { id: "enrichment", label: "Query Enrichment" },
+  { id: "scrape", label: "Scraping Data" },
+  { id: "analysis", label: "Analyzing Sentiment & Trends" },
+  { id: "synthesis", label: "Generating Report" },
 ];
 
 interface Props {
@@ -18,9 +15,33 @@ interface Props {
 }
 
 export default function ProgressStream({ progress }: Props) {
-  const maxStep = progress.length > 0
-    ? Math.max(...progress.map((p) => p.step))
-    : 0;
+  // Compute the latest state of each task
+  const [taskStatus, setTaskStatus] = useState<Record<string, "pending" | "running" | "complete">>({
+    enrichment: "pending",
+    scrape: "pending",
+    analysis: "pending",
+    synthesis: "pending",
+  });
+
+  useEffect(() => {
+    const newStatus: Record<string, "pending" | "running" | "complete"> = {
+      enrichment: "pending",
+      scrape: "pending",
+      analysis: "pending",
+      synthesis: "pending",
+    };
+
+    // Each progress event has {task, status, message} — apply in order
+    progress.forEach((p) => {
+      const task = p.task;
+      const status = p.status as "running" | "complete";
+      if (task && (task in newStatus) && status) {
+        newStatus[task] = status;
+      }
+    });
+
+    setTaskStatus(newStatus);
+  }, [progress]);
 
   const latestMessage = progress.length > 0
     ? progress[progress.length - 1].message
@@ -41,69 +62,75 @@ export default function ProgressStream({ progress }: Props) {
         <span className="font-semibold text-slate-900">Analyzing reviews...</span>
       </div>
 
-      {/* Step checklist */}
-      <div className="space-y-2 mb-6">
-        {STEPS.map((step, i) => {
-          const stepNum = i + 1;
-          const isDone = maxStep > stepNum;
-          const isActive = maxStep === stepNum;
-          const isPending = maxStep < stepNum;
+      {/* Concurrent Task checklist */}
+      <div className="space-y-4 mb-6">
+        {TASKS.map(({ id, label }) => {
+          const status = taskStatus[id];
+          const isDone = status === "complete";
+          const isActive = status === "running";
 
           return (
-            <div key={step} className="flex items-center gap-3">
+            <div key={id} className="flex items-center gap-3 bg-slate-50 p-3 rounded-lg border border-slate-100">
               <div
-                className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${
+                className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 transition-colors ${
                   isDone
-                    ? "bg-green-500"
+                    ? "bg-green-500 text-white"
                     : isActive
-                    ? "bg-blue-500"
-                    : "bg-slate-200"
+                    ? "bg-blue-500 text-white"
+                    : "bg-slate-200 text-slate-400"
                 }`}
               >
                 {isDone ? (
-                  <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
                   </svg>
                 ) : isActive ? (
-                  <svg className="w-3 h-3 text-white animate-spin" fill="none" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
                 ) : (
-                  <span className="text-slate-400 text-xs">{stepNum}</span>
+                  <div className="w-2 h-2 rounded-full bg-slate-300" />
                 )}
               </div>
               <span
-                className={`text-sm ${
+                className={`text-sm font-medium ${
                   isDone
                     ? "text-slate-500 line-through"
                     : isActive
-                    ? "text-slate-900 font-medium"
+                    ? "text-slate-900"
                     : "text-slate-400"
                 }`}
               >
-                {step}
+                {label}
               </span>
+              {isActive && (
+                <span className="ml-auto text-xs font-semibold text-blue-500 bg-blue-50 px-2 py-1 rounded">
+                  In Progress
+                </span>
+              )}
             </div>
           );
         })}
       </div>
 
       {/* Latest message */}
-      <div className="bg-slate-50 rounded-lg p-3 text-sm text-slate-600">
+      <div className="bg-slate-50 rounded-lg p-3 text-sm text-slate-600 border mx-auto">
         <span className="font-mono">{latestMessage}</span>
       </div>
 
       {/* Log */}
       {progress.length > 1 && (
         <details className="mt-4">
-          <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-600">
-            View full log ({progress.length} messages)
+          <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-600 font-medium">
+            View full log events ({progress.length} messages)
           </summary>
-          <div className="mt-2 space-y-1 max-h-48 overflow-y-auto">
+          <div className="mt-4 p-3 bg-slate-900 rounded-lg space-y-1 max-h-48 overflow-y-auto font-mono text-xs">
             {progress.map((p, i) => (
-              <div key={i} className="text-xs text-slate-500 font-mono">
-                [{p.step}/{p.total_steps}] {p.message}
+              <div key={i} className="text-emerald-400">
+                <span className="text-slate-500 mr-2">[{new Date().toLocaleTimeString()}]</span>
+                {p.task && <span className="text-blue-400 mr-2">[{p.task}]</span>}
+                {p.message}
               </div>
             ))}
           </div>

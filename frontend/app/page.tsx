@@ -150,7 +150,7 @@ export default function HomePage() {
           {
             icon: "🤖",
             title: "Local LLM",
-            desc: "Powered by Ollama + Mistral. All processing stays on your machine.",
+            desc: "Powered by Ollama + llama3.2. All processing stays on your machine.",
           },
         ].map((f) => (
           <div key={f.title} className="bg-white rounded-xl border border-slate-200 p-6">

@@ -6,10 +6,13 @@ export interface ProgressEntry {
   message: string;
   step: number;
   total_steps: number;
+  task?: string;
+  status?: string;
 }
 
 export interface ReportData {
   product_name: string;
+  image_url?: string;
   overall_score: number;
   total_reviews_analyzed: number;
   sources_used: string[];
@@ -93,6 +96,8 @@ export function useReportStream(jobId: string) {
               message: payload.message || "",
               step: payload.step || 0,
               total_steps: payload.total_steps || 8,
+              task: payload.task,
+              status: payload.status,
             },
           ]);
         } else if (type === "partial") {

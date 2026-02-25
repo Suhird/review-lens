@@ -101,3 +101,22 @@ async def store_report(product_id: str, report: FinalReport) -> None:
             product_id,
             report.model_dump_json(),
         )
+
+async def get_report(normalized_name: str) -> Optional[FinalReport]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT r.report_json
+            FROM reports r
+            JOIN products p ON r.product_id = p.id
+            WHERE p.normalized_name = $1
+            ORDER BY r.created_at DESC
+            LIMIT 1
+            """,
+            normalized_name,
+        )
+        if row:
+            import json
+            return FinalReport.model_validate(json.loads(row["report_json"]))
+        return None

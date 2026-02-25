@@ -15,6 +15,12 @@ logger = logging.getLogger(__name__)
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_COMMENTS_URL = "https://www.googleapis.com/youtube/v3/commentThreads"
 
+VIDEO_PHRASES = [
+    "great video", "love your videos", "new subscriber", "thanks for sharing",
+    "great review", "good review", "nice video", "subbed", "thanks for the review",
+    "awesome review", "informative video", "helpful video"
+]
+
 
 def _make_review_id(comment_id: str) -> str:
     return hashlib.md5(f"youtube:{comment_id}".encode()).hexdigest()
@@ -82,6 +88,10 @@ async def scrape_youtube(query: str) -> list[RawReview]:
                     text: str = snippet.get("textDisplay", "")
 
                     if len(text.strip()) < 50:
+                        continue
+
+                    text_lower = text.lower()
+                    if any(phrase in text_lower for phrase in VIDEO_PHRASES):
                         continue
 
                     comment_id: str = item.get("id", "")

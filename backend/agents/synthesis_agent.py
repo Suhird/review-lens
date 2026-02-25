@@ -73,9 +73,9 @@ def _select_featured_reviews(
     clusters: list[Any],
     n: int = 5,
 ) -> list[RawReview]:
-    # Pick one per dominant cluster first, then fill with best overall
     featured: list[RawReview] = []
     used_ids: set[str] = set()
+    seen_sources: set[str] = set()
 
     def is_good_review(r: RawReview) -> bool:
         return (
@@ -83,11 +83,7 @@ def _select_featured_reviews(
             and 100 <= len(r.text) <= 500
         )
 
-    # Try to pick one per cluster
-    for cluster in clusters[:5]:
-        pass  # We don't have cluster-to-review mapping here; fill from overall
-
-    # Fallback: sort by quality criteria
+    # Sort candidates by quality criteria
     candidates = sorted(
         reviews,
         key=lambda r: (
@@ -99,16 +95,24 @@ def _select_featured_reviews(
         reverse=True,
     )
 
+    # Pass 1: Try to pick one high-quality review from each available source
     for r in candidates:
-        if r.id in used_ids:
-            continue
-        if is_good_review(r):
+        if r.source not in seen_sources and is_good_review(r):
             featured.append(r)
             used_ids.add(r.id)
+            seen_sources.add(r.source)
         if len(featured) >= n:
             break
 
-    # Fill if we don't have enough
+    # Pass 2: Fill remaining slots with the best overall unused reviews
+    for r in candidates:
+        if len(featured) >= n:
+            break
+        if r.id not in used_ids and is_good_review(r):
+            featured.append(r)
+            used_ids.add(r.id)
+
+    # Pass 3: Fill if we still don't have enough (ignoring the length constraint)
     for r in candidates:
         if len(featured) >= n:
             break
@@ -216,6 +220,7 @@ async def synthesize_report(state: "ReviewLensState") -> FinalReport:
     fake_report = state.get("fake_report")
     drift_report = state.get("drift_report")
     clusters = state.get("clusters", [])
+    product_image = state.get("product_image")
 
     sources_used = list({r.source for r in reviews})
     overall_score = _compute_overall_score(
@@ -260,6 +265,7 @@ async def synthesize_report(state: "ReviewLensState") -> FinalReport:
 
     return FinalReport(
         product_name=query,
+        image_url=product_image,
         overall_score=overall_score,
         total_reviews_analyzed=len(reviews),
         sources_used=sources_used,

@@ -24,39 +24,37 @@ if [ ! -f .env ]; then
 fi
 
 echo ""
-echo "[1/5] Starting Ollama service..."
-docker compose up -d ollama
-
-echo ""
-echo "[2/5] Waiting for Ollama to be ready (30 seconds)..."
-sleep 30
-
-# Verify Ollama is up
+echo "[1/4] Verifying native Ollama is running..."
 OLLAMA_READY=false
-for i in $(seq 1 10); do
-  if docker exec reviewlens_ollama curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; then
+for i in $(seq 1 5); do
+  if curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; then
     OLLAMA_READY=true
     break
   fi
-  echo "  Waiting for Ollama... attempt $i/10"
-  sleep 5
+  echo "  Waiting for local Ollama... attempt $i/5"
+  sleep 2
 done
 
 if [ "$OLLAMA_READY" = false ]; then
-  echo "ERROR: Ollama did not start in time. Check logs: docker logs reviewlens_ollama"
+  echo "ERROR: Local Ollama is not responding on http://localhost:11434."
+  echo "Please install Ollama from ollama.com and ensure it is running."
   exit 1
 fi
 
-echo ""
-echo "[3/5] Pulling Mistral model (this may take several minutes on first run)..."
-docker exec reviewlens_ollama ollama pull mistral
+# Get model from .env, default to mistral
+OLLAMA_MODEL=$(grep '^OLLAMA_MODEL=' .env | cut -d '=' -f2)
+MODEL=${OLLAMA_MODEL:-mistral}
 
 echo ""
-echo "[4/5] Starting all remaining services..."
+echo "[2/4] Ensuring $MODEL model is downloaded natively..."
+ollama pull "$MODEL" || echo "Warning: Could not pull $MODEL automatically. Run 'ollama pull $MODEL' if needed."
+
+echo ""
+echo "[3/4] Starting all remaining services..."
 docker compose up -d postgres redis backend frontend
 
 echo ""
-echo "[5/5] Waiting for all services to be healthy..."
+echo "[4/4] Waiting for all services to be healthy..."
 MAX_WAIT=120
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do

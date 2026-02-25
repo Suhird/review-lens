@@ -45,7 +45,7 @@ async def shutdown_event() -> None:
     await close_pool()
 
 
-async def _run_pipeline(job_id: str, query: str) -> None:
+async def _run_pipeline(job_id: str, query: str, use_cache: bool = True) -> None:
     """Run the full LangGraph pipeline and store results in Redis."""
     from graph import review_lens_graph
     from cache.redis_manager import normalize_name
@@ -67,16 +67,18 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         await update_progress("Starting analysis pipeline...", 1)
 
         initial_state = {
+            "job_id": job_id,
             "query": query,
+            "use_cache": use_cache,
             "enriched_queries": [],
             "raw_reviews": [],
+            "product_image": None,
             "cleaned_reviews": [],
             "aspect_scores": [],
             "fake_report": None,
             "drift_report": None,
             "clusters": [],
             "final_report": None,
-            "progress": [],
             "errors": [],
         }
 
@@ -100,10 +102,12 @@ async def _run_pipeline(job_id: str, query: str) -> None:
         except Exception as e:
             logger.warning(f"DB persistence failed (non-fatal): {e}")
 
+        # Read accumulated progress from Redis (written by nodes during execution)
+        existing_job = await get_job_data(job_id) or {}
         job_data = {
             "status": "complete",
             "query": query,
-            "progress": final_state.get("progress", []),
+            "progress": existing_job.get("progress", []),
             "errors": errors,
             "report": json.loads(report.model_dump_json()),
         }
@@ -136,9 +140,26 @@ async def analyze(request: AnalyzeRequest, background_tasks: BackgroundTasks) ->
                 "report": json.loads(cached.model_dump_json()),
             })
             return AnalyzeResponse(job_id=job_id)
+            
+        # Check database for previous analysis
+        from db.database import get_report
+        from cache.redis_manager import normalize_name
+        norm = normalize_name(query)
+        db_report = await get_report(norm)
+        if db_report:
+            await cache_report(query, db_report)
+            job_id = str(uuid.uuid4())
+            await set_job_data(job_id, {
+                "status": "complete",
+                "query": query,
+                "progress": [{"message": "Loaded from database", "step": 8, "total_steps": 8}],
+                "errors": [],
+                "report": json.loads(db_report.model_dump_json()),
+            })
+            return AnalyzeResponse(job_id=job_id)
 
     job_id = str(uuid.uuid4())
-    background_tasks.add_task(_run_pipeline, job_id, query)
+    background_tasks.add_task(_run_pipeline, job_id, query, request.use_cache)
     return AnalyzeResponse(job_id=job_id)
 
 

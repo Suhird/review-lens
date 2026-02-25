@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TypedDict
+import operator
+from typing import Annotated, Optional, TypedDict
 
 from langgraph.graph import StateGraph, END
 
@@ -18,118 +19,196 @@ from models import (
 logger = logging.getLogger(__name__)
 
 
+def _last_non_none(a, b):
+    """Reducer: keep the last non-None value (for parallel branches)."""
+    return b if b is not None else a
+
+
 class ReviewLensState(TypedDict):
+    job_id: str
     query: str
+    use_cache: bool
     enriched_queries: list[str]
     raw_reviews: list[RawReview]
+    product_image: Annotated[Optional[str], _last_non_none]
     cleaned_reviews: list[RawReview]
     aspect_scores: list[ReviewAspect]
     fake_report: FakeReviewReport
     drift_report: DriftReport
     clusters: list[ReviewCluster]
     final_report: FinalReport
-    progress: list[str]
-    errors: list[str]
+    errors: Annotated[list[str], operator.add]
+
+async def _flush_progress(job_id: str, query: str, message=None, errors: list[str] | None = None):
+    """Append a single progress message to the job in Redis (safe for parallel nodes)."""
+    from cache.redis_manager import get_job_data, set_job_data
+    job = await get_job_data(job_id) or {"status": "running", "progress": [], "errors": []}
+    job["query"] = query
+    if message is not None:
+        job.setdefault("progress", []).append(message)
+    if errors:
+        existing = job.get("errors", [])
+        for e in errors:
+            if e not in existing:
+                existing.append(e)
+        job["errors"] = existing
+    await set_job_data(job_id, job)
 
 
-async def enrich_query_node(state: ReviewLensState) -> ReviewLensState:
+
+async def enrich_query_node(state: ReviewLensState) -> dict:
     from agents.synthesis_agent import enrich_query
 
     query = state["query"]
-    progress = list(state.get("progress", []))
-    errors = list(state.get("errors", []))
+    new_errors: list[str] = []
 
-    progress.append("Enriching query with LLM...")
+    await _flush_progress(state["job_id"], query, {"task": "enrichment", "status": "running", "message": "Enriching query with LLM..."})
     try:
         enriched = await enrich_query(query)
     except Exception as e:
         logger.warning(f"Query enrichment failed: {e}")
-        errors.append(f"Query enrichment failed: {e}")
+        new_errors.append(f"Query enrichment failed: {e}")
+        await _flush_progress(state["job_id"], query, {"task": "enrichment", "status": "complete", "message": "Query enrichment failed, using original query"}, new_errors)
         enriched = [query]
+    else:
+        await _flush_progress(state["job_id"], query, {"task": "enrichment", "status": "complete", "message": "Query enrichment complete"})
 
+    # Return ONLY changed keys (no **state) — critical for parallel branch merge
     return {
-        **state,
         "enriched_queries": enriched,
-        "progress": progress,
-        "errors": errors,
+        "errors": new_errors,
     }
 
 
-async def scraper_node(state: ReviewLensState) -> ReviewLensState:
+async def scraper_node(state: ReviewLensState) -> dict:
     from scrapers.amazon import scrape_amazon
     from scrapers.reddit import scrape_reddit
     from scrapers.bestbuy import scrape_bestbuy
     from scrapers.youtube import scrape_youtube
+    from cache.redis_manager import get_cached_reviews, cache_reviews, normalize_name
+    from db.database import store_reviews, upsert_product
 
     query = state["query"]
-    progress = list(state.get("progress", []))
-    errors = list(state.get("errors", []))
+    enriched = state.get("enriched_queries", [query])
+    use_cache = state.get("use_cache", True)
+    new_errors: list[str] = []
     all_reviews: list[RawReview] = []
+    product_image: Optional[str] = None
 
-    progress.append("Scraping reviews from all sources...")
+    norm_query = normalize_name(query)
 
-    async def safe_scrape(scraper_fn, name: str, *args) -> list[RawReview]:
-        try:
-            progress.append(f"Scraping {name}...")
-            results = await scraper_fn(*args)
-            progress.append(f"Scraped {len(results)} reviews from {name}")
-            return results
-        except Exception as e:
-            logger.warning(f"Scraper {name} failed: {e}")
-            errors.append(f"{name} scraper failed: {e}")
-            return []
+    if use_cache:
+        cached = await get_cached_reviews(norm_query)
+        if cached:
+            await _flush_progress(state["job_id"], query, {"task": "scrape", "status": "complete", "message": f"Loaded {len(cached)} reviews from cache"})
+            return {
+                "raw_reviews": cached,
+                "cleaned_reviews": cached,
+                "errors": [],
+            }
 
-    results = await asyncio.gather(
-        safe_scrape(scrape_amazon, "Amazon", query),
-        safe_scrape(scrape_reddit, "Reddit", query),
-        safe_scrape(scrape_bestbuy, "Best Buy", query),
-        safe_scrape(scrape_youtube, "YouTube", query),
-    )
+    await _flush_progress(state["job_id"], query, {"task": "scrape", "status": "running", "message": "Scraping reviews from all sources..."})
 
-    for batch in results:
-        all_reviews.extend(batch)
+    try:
+        term = enriched[0] if enriched else query
+        logger.info(f"Scraping for term: {term}")
 
-    if not all_reviews:
-        errors.append("No reviews collected from any source")
+        scrapers = [
+            scrape_amazon(term),
+            scrape_bestbuy(term),
+            scrape_reddit(term),
+            scrape_youtube(term),
+        ]
+        results = await asyncio.gather(*scrapers, return_exceptions=True)
 
-    progress.append(f"Total reviews collected: {len(all_reviews)}")
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                logger.error(f"Scraper error: {res}")
+                new_errors.append(f"Scraper error: {str(res)}")
+            elif isinstance(res, list):
+                logger.info(f"Scraper {i}: returned {len(res)} reviews (list)")
+                all_reviews.extend(res)
+            elif isinstance(res, tuple):
+                reviews, img = res
+                logger.info(f"Scraper {i}: returned {len(reviews)} reviews, image={img is not None}")
+                all_reviews.extend(reviews)
+                if img and not product_image:
+                    product_image = img
 
-    return {
-        **state,
+        if all_reviews:
+            pid = await upsert_product(norm_query, query)
+            await store_reviews(pid, all_reviews)
+            await cache_reviews(norm_query, all_reviews)
+
+    except Exception as e:
+        logger.error(f"Scraping failed: {e}")
+        new_errors.append(f"Scraping framework error: {e}")
+
+    logger.info(f"Scraper node: total={len(all_reviews)} reviews, product_image={'YES: ' + product_image[:80] if product_image else 'None'}")
+    await _flush_progress(state["job_id"], query, {"task": "scrape", "status": "complete", "message": f"Total reviews collected: {len(all_reviews)}"}, new_errors)
+
+    # Return ONLY changed keys (no **state) — critical for parallel branch merge
+    result: dict = {
         "raw_reviews": all_reviews,
         "cleaned_reviews": all_reviews,
-        "progress": progress,
-        "errors": errors,
+        "errors": new_errors,
     }
+    if product_image:
+        result["product_image"] = product_image
+    return result
 
 
-async def analysis_node(state: ReviewLensState) -> ReviewLensState:
+async def analysis_node(state: ReviewLensState) -> dict:
     from analysis.absa import run_absa
     from analysis.fake_detector import detect_fake_reviews
     from analysis.drift_detector import detect_drift
     from analysis.clusterer import cluster_reviews
 
     reviews = state.get("cleaned_reviews", [])
-    progress = list(state.get("progress", []))
-    errors = list(state.get("errors", []))
+    query = state["query"]
+    product_image = state.get("product_image")
+    new_errors: list[str] = []
+
+    if not reviews:
+        empty_report = FinalReport(
+            product_name=query,
+            image_url=product_image,
+            overall_score=0.0,
+            total_reviews_analyzed=0,
+            sources_used=[],
+            sentiment_breakdown={"positive": 0, "neutral": 0, "negative": 0},
+            aspect_scores=[],
+            fake_report=FakeReviewReport(
+                total_reviews=0, flagged_count=0, fake_percentage=0.0,
+                flagged_ids=[], risk_level="low"
+            ),
+            drift_report=DriftReport(monthly_sentiment=[], change_points=[], trend="stable"),
+            clusters=[],
+            featured_reviews=[],
+            executive_summary="No reviews found.",
+            who_should_buy="",
+            who_should_skip="",
+            verdict="Insufficient data"
+        )
+        return {"final_report": empty_report, "errors": []}
 
     # ABSA
-    progress.append("Running aspect-based sentiment analysis...")
+    await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Running aspect-based sentiment analysis..."})
     try:
         aspect_scores, reviews_with_fake = await run_absa(reviews)
     except Exception as e:
         logger.error(f"ABSA failed: {e}")
-        errors.append(f"ABSA failed: {e}")
+        new_errors.append(f"ABSA failed: {e}")
         aspect_scores = []
         reviews_with_fake = reviews
 
     # Fake detection
-    progress.append("Detecting fake reviews...")
+    await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Detecting fake reviews..."})
     try:
         fake_report, reviews_scored = detect_fake_reviews(reviews_with_fake)
     except Exception as e:
         logger.error(f"Fake detection failed: {e}")
-        errors.append(f"Fake detection failed: {e}")
+        new_errors.append(f"Fake detection failed: {e}")
         fake_report = FakeReviewReport(
             total_reviews=len(reviews),
             flagged_count=0,
@@ -140,52 +219,51 @@ async def analysis_node(state: ReviewLensState) -> ReviewLensState:
         reviews_scored = reviews
 
     # Drift detection
-    progress.append("Analyzing sentiment drift over time...")
+    await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Analyzing sentiment drift over time..."})
     try:
         drift_report = detect_drift(reviews_scored)
     except Exception as e:
         logger.error(f"Drift detection failed: {e}")
-        errors.append(f"Drift detection failed: {e}")
+        new_errors.append(f"Drift detection failed: {e}")
         drift_report = DriftReport(monthly_sentiment=[], change_points=[], trend="stable")
 
     # Clustering
-    progress.append("Clustering reviews by theme...")
+    await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Clustering reviews by theme..."})
     try:
         clusters = await cluster_reviews(reviews_scored)
     except Exception as e:
         logger.error(f"Clustering failed: {e}")
-        errors.append(f"Clustering failed: {e}")
+        new_errors.append(f"Clustering failed: {e}")
         clusters = []
 
+    await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "complete", "message": "Analysis complete"}, new_errors)
+
     return {
-        **state,
         "cleaned_reviews": reviews_scored,
         "aspect_scores": aspect_scores,
         "fake_report": fake_report,
         "drift_report": drift_report,
         "clusters": clusters,
-        "progress": progress,
-        "errors": errors,
+        "errors": new_errors,
     }
 
 
-async def synthesis_node(state: ReviewLensState) -> ReviewLensState:
+async def synthesis_node(state: ReviewLensState) -> dict:
     from agents.synthesis_agent import synthesize_report
 
-    progress = list(state.get("progress", []))
-    errors = list(state.get("errors", []))
+    new_errors: list[str] = []
 
-    progress.append("Synthesizing final report...")
+    await _flush_progress(state["job_id"], state["query"], {"task": "synthesis", "status": "running", "message": "Synthesizing final report..."})
     try:
         final_report = await synthesize_report(state)
     except Exception as e:
         logger.error(f"Synthesis failed: {e}")
-        errors.append(f"Synthesis failed: {e}")
-        # Build minimal report
+        new_errors.append(f"Synthesis failed: {e}")
         reviews = state.get("cleaned_reviews", [])
         sources = list({r.source for r in reviews})
         final_report = FinalReport(
             product_name=state["query"],
+            image_url=state.get("product_image"),
             overall_score=0.0,
             total_reviews_analyzed=len(reviews),
             sources_used=sources,
@@ -206,13 +284,11 @@ async def synthesis_node(state: ReviewLensState) -> ReviewLensState:
             verdict="Insufficient data to generate verdict.",
         )
 
-    progress.append("Report complete!")
+    await _flush_progress(state["job_id"], state["query"], {"task": "synthesis", "status": "complete", "message": "Report complete!"}, new_errors)
 
     return {
-        **state,
         "final_report": final_report,
-        "progress": progress,
-        "errors": errors,
+        "errors": new_errors,
     }
 
 
@@ -224,13 +300,19 @@ def build_graph() -> StateGraph:
     builder.add_node("analysis_node", analysis_node)
     builder.add_node("synthesis_node", synthesis_node)
 
-    builder.set_entry_point("enrich_query_node")
-    builder.add_edge("enrich_query_node", "scraper_node")
+    # Launch both in parallel by branching from START
+    from langgraph.graph import START
+    builder.add_edge(START, "enrich_query_node")
+    builder.add_edge(START, "scraper_node")
+    
+    # Both paths converge at analysis_node
+    builder.add_edge("enrich_query_node", "analysis_node")
     builder.add_edge("scraper_node", "analysis_node")
+    
     builder.add_edge("analysis_node", "synthesis_node")
     builder.add_edge("synthesis_node", END)
 
     return builder.compile()
 
-
 review_lens_graph = build_graph()
+

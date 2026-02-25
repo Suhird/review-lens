@@ -49,6 +49,7 @@ class ReviewCluster(BaseModel):
 
 class FinalReport(BaseModel):
     product_name: str
+    image_url: Optional[str] = None
     overall_score: float
     total_reviews_analyzed: int
     sources_used: list[str]

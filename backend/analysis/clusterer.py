@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -122,27 +123,28 @@ async def cluster_reviews(reviews: list[RawReview]) -> list[ReviewCluster]:
         return []
 
     llm = ChatOllama(base_url=settings.ollama_base_url, model=settings.ollama_model)
-    clusters: list[ReviewCluster] = []
 
+    # Build cluster data and name all clusters concurrently
+    cluster_data = []
     for label in sorted(unique_labels):
         cluster_indices = [i for i, l in enumerate(labels) if l == label]
-        cluster_reviews = [reviews[i] for i in cluster_indices]
+        cluster_revs = [reviews[i] for i in cluster_indices]
+        cluster_data.append((int(label), cluster_revs))
 
-        theme = await _name_cluster(llm, cluster_reviews)
-        sentiment = _determine_cluster_sentiment(cluster_reviews)
-        top_quotes = _get_top_quotes(cluster_reviews, n=3)
+    themes = await asyncio.gather(*[_name_cluster(llm, cd[1]) for cd in cluster_data])
 
+    clusters: list[ReviewCluster] = []
+    for (label, cluster_revs), theme in zip(cluster_data, themes):
         clusters.append(
             ReviewCluster(
-                cluster_id=int(label),
+                cluster_id=label,
                 theme=theme,
-                review_count=len(cluster_reviews),
-                sentiment=sentiment,
-                top_quotes=top_quotes,
+                review_count=len(cluster_revs),
+                sentiment=_determine_cluster_sentiment(cluster_revs),
+                top_quotes=_get_top_quotes(cluster_revs, n=3),
             )
         )
 
-    # Sort by review count descending
     clusters.sort(key=lambda c: c.review_count, reverse=True)
     logger.info(f"Clustering: {len(clusters)} clusters found from {len(reviews)} reviews")
     return clusters

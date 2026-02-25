@@ -197,20 +197,38 @@ async def _navigate_to_product(page: Page, product_url: str) -> bool:
     return True
 
 
-async def _scrape_reviews_for_product(page: Page, product_url: str) -> list[RawReview]:
+async def _scrape_reviews_for_product(page: Page, product_url: str) -> tuple[list[RawReview], Optional[str]]:
     """
     Scrape reviews by loading the product page directly.
     Amazon embeds the first page of reviews in the product page HTML.
     We parse those and also try paginating through the reviews section.
+    Returns (reviews, image_url).
     """
     reviews: list[RawReview] = []
+    image_url: Optional[str] = None
 
     success = await _navigate_to_product(page, product_url)
     if not success:
-        return reviews
+        return reviews, None
 
     content = await page.content()
     soup = BeautifulSoup(content, "lxml")
+    
+    # Try to extract the main product image
+    img_el = soup.select_one("img#landingImage") or soup.select_one("img.a-dynamic-image")
+    if img_el and img_el.has_attr("src"):
+        image_url = img_el["src"]
+        # sometimes amazon uses high-rez dict in data-a-dynamic-image
+        if img_el.has_attr("data-a-dynamic-image"):
+            import json
+            try:
+                images_dict = json.loads(img_el["data-a-dynamic-image"])
+                if images_dict:
+                    # pick the highest resolution
+                    image_url = max(images_dict.keys(), key=lambda k: images_dict[k][0] * images_dict[k][1])
+            except Exception:
+                pass
+                
     page_reviews = _parse_reviews_from_soup(soup)
     reviews.extend(page_reviews)
     logger.debug(f"Amazon product page: parsed {len(page_reviews)} reviews from {product_url}")
@@ -234,11 +252,12 @@ async def _scrape_reviews_for_product(page: Page, product_url: str) -> list[RawR
         except Exception:
             break
 
-    return reviews
+    return reviews, image_url
 
 
-async def scrape_amazon(query: str) -> list[RawReview]:
+async def scrape_amazon(query: str) -> tuple[list[RawReview], Optional[str]]:
     all_reviews: list[RawReview] = []
+    main_image_url: Optional[str] = None
 
     async with async_playwright() as p:
         browser: Browser = await p.chromium.launch(
@@ -271,14 +290,16 @@ async def scrape_amazon(query: str) -> list[RawReview]:
             product_links = await _get_product_links(page, query)
             if not product_links:
                 logger.warning("No Amazon product links found")
-                return []
+                return [], None
 
             logger.info(f"Amazon: found {len(product_links)} products to scrape")
 
             for link in product_links[:3]:
                 try:
-                    page_reviews = await _scrape_reviews_for_product(page, link)
+                    page_reviews, image_url = await _scrape_reviews_for_product(page, link)
                     all_reviews.extend(page_reviews)
+                    if image_url and not main_image_url:
+                        main_image_url = image_url
                     logger.info(f"Amazon: {len(page_reviews)} reviews from {link}")
                     await asyncio.sleep(_random_delay())
                 except Exception as e:
@@ -289,4 +310,4 @@ async def scrape_amazon(query: str) -> list[RawReview]:
             await browser.close()
 
     logger.info(f"Amazon scraper collected {len(all_reviews)} reviews total")
-    return all_reviews
+    return all_reviews, main_image_url

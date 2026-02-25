@@ -19,6 +19,7 @@ Type any product name and ReviewLens automatically:
 
 ## Prerequisites
 
+- **Ollama** — [download](https://ollama.com/download) (Run natively on macOS to leverage Apple Silicon GPU)
 - **Docker Desktop** (includes Docker Compose) — [download](https://www.docker.com/products/docker-desktop/)
 - **16 GB RAM recommended** (Mistral LLM requires ~8 GB)
 - **Git**
@@ -53,7 +54,7 @@ REDDIT_CLIENT_SECRET=your_reddit_client_secret
 
 See [How to get Reddit credentials](#how-to-get-reddit-api-credentials) below.
 
-### Step 4: Run the initialization script
+### Step 4: Run the initialization script (First Time Only)
 
 ```bash
 chmod +x init.sh
@@ -61,11 +62,25 @@ chmod +x init.sh
 ```
 
 This will:
-1. Start Ollama
+1. Verify native Ollama is running on your Mac
 2. Pull the Mistral model (~4 GB, one-time download)
-3. Start all services (PostgreSQL, Redis, backend, frontend)
+3. Start all Docker services (PostgreSQL, Redis, backend, frontend)
 
-### Step 5: Open your browser
+### Step 5: Starting the Project (Daily Use)
+
+After you've run the initialization script once, you don't need to run it again. To start the full-stack application (frontend, backend, database, redis, and ollama) on subsequent days, simply run:
+
+```bash
+docker compose up -d
+```
+
+To stop all services when you are done, run:
+
+```bash
+docker compose down
+```
+
+### Step 6: Open your browser
 
 ```
 http://localhost:3000
@@ -75,17 +90,13 @@ http://localhost:3000
 
 ## How to get Reddit API credentials
 
-1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)
-2. Scroll to the bottom and click **"create another app..."**
-3. Fill in:
-   - **Name:** ReviewLens
-   - **App type:** Select **"script"**
-   - **Redirect URI:** `http://localhost:8080`
-4. Click **"create app"**
-5. Your `client_id` is the string under the app name (e.g., `abc123`)
-6. Your `client_secret` is labeled "secret"
+**⚠️ Important Update (2024):** Reddit has effectively locked down self-serve API access. If you try to create a new app at `reddit.com/prefs/apps`, you will likely be stuck in an endless loop telling you to read the "Responsible Builder Policy." Reddit now requires a manual review process for new API access which can take weeks and is often denied for personal projects.
 
-Copy both values into your `.env` file.
+**If you do not already have an old Reddit Client ID:**
+Simply leave `REDDIT_CLIENT_ID` and `REDDIT_CLIENT_SECRET` empty or commented out in your `.env` file! ReviewLens is designed to gracefully skip Reddit if credentials are not found and will still generate great reports using Amazon, Best Buy, and YouTube.
+
+**If you have an old, working Client ID:**
+You can still use it! Find it at [old.reddit.com/prefs/apps](https://old.reddit.com/prefs/apps). Your `client_id` is the string under the app name, and your `client_secret` is labeled "secret".
 
 ---
 
@@ -105,43 +116,53 @@ If you skip this step, YouTube reviews will not be included but everything else 
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Docker Compose                              │
-│                                                                     │
-│  ┌──────────┐    ┌─────────────────────────────────────────────┐    │
-│  │          │    │              FastAPI Backend                │    │ 
-│  │  Next.js │    │                                             │    │
-│  │ Frontend │───▶│  POST /api/analyze  →  LangGraph Pipeline   │    │
-│  │ :3000    │    │  GET  /api/stream/{id}  →  SSE events       │    │
-│  │          │    │  GET  /api/report/{id}  →  Final report     │    │
-│  └──────────┘    │                                             │    │
-│                  │  ┌─────────────────────────────────────┐    │    │
-│                  │  │         LangGraph Pipeline          │    │    │
-│                  │  │                                     │    │    │
-│                  │  │  enrich_query ──▶ scraper_node      │    │    │
-│                  │  │       │              │              │    │    │
-│                  │  │       │    ┌─────────┤              │    │    │
-│                  │  │       │    │ Amazon  │              │    │    │
-│                  │  │       │    │ Reddit  │              │    │    │
-│                  │  │       │    │ BestBuy │              │    │    │
-│                  │  │       │    │ YouTube │              │    │    │
-│                  │  │       │    └────┬────┘              │    │    │
-│                  │  │       ▼         ▼                   │    │    │
-│                  │  │  analysis_node (ABSA + fake         │    │    │
-│                  │  │   detection + drift + clustering)   │    │    │
-│                  │  │       │                             │    │    │
-│                  │  │       ▼                             │    │    │
-│                  │  │  synthesis_node (LLM summary)       │    │    │
-│                  │  └─────────────────────────────────────┘    │    │ 
-│                  └─────────────────────────────────────────────┘    │
-│                                                                     │
-│  ┌──────────┐  ┌──────────┐  ┌──────────────────────────────────┐   │
-│  │ Ollama   │  │PostgreSQL│  │  Redis                           │   │
-│  │ :11434   │  │ :5432    │  │  :6379                           │   │
-│  │ (Mistral)│  │ pgvector │  │  Job state + 24hr report cache   │   │
-│  └──────────┘  └──────────┘  └──────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
+```text
+┌───────────────────────────────────────────────────────────────────────┐
+│                              macOS Host                               │
+│                                                                       │
+│  ┌──────────┐                                                         │
+│  │ Ollama   │                                                         │
+│  │ :11434   │◀──────────────┐                                         │
+│  │ (Native) │               │                                         │
+│  └──────────┘               │                                         │
+│                             │                                         │
+│ ┌───────────────────────────┼───────────────────────────────────────┐ │
+│ │                     Docker Compose                                │ │
+│ │                           │                                       │ │
+│ │  ┌──────────┐    ┌────────┴────────────────────────────────────┐  │ │
+│ │  │          │    │              FastAPI Backend                │  │ │
+│ │  │  Next.js │    │                                             │  │ │
+│ │  │ Frontend │───▶│  POST /api/analyze  →  LangGraph Pipeline   │  │ │
+│ │  │ :3000    │    │  GET  /api/stream/{id}  →  SSE events       │  │ │
+│ │  │          │    │  GET  /api/report/{id}  →  Final report     │  │ │
+│ │  └──────────┘    │                                             │  │ │
+│ │                  │  ┌─────────────────────────────────────┐    │  │ │
+│ │                  │  │         LangGraph Pipeline          │    │  │ │
+│ │                  │  │                                     │    │  │ │
+│ │                  │  │  enrich_query ──▶ scraper_node      │    │  │ │
+│ │                  │  │       │              │              │    │  │ │
+│ │                  │  │       │    ┌──────────┤             │    │  │ │
+│ │                  │  │       │    │ Amazon   │             │    │  │ │
+│ │                  │  │       │    │ Reddit   │             │    │  │ │
+│ │                  │  │       │    │ BestBuy  │             │    │  │ │
+│ │                  │  │       │    │ YouTube  │             │    │  │ │
+│ │                  │  │       │    └────┬─────┘             │    │  │ │
+│ │                  │  │       ▼         ▼                   │    │  │ │
+│ │                  │  │  analysis_node (ABSA + fake         │    │  │ │
+│ │                  │  │   detection + drift + clustering)   │    │  │ │
+│ │                  │  │       │                             │    │  │ │
+│ │                  │  │       ▼                             │    │  │ │
+│ │                  │  │  synthesis_node (LLM summary)       │    │  │ │
+│ │                  │  └─────────────────────────────────────┘    │  │ │ 
+│ │                  └─────────────────────────────────────────────┘  │ │
+│ │                                                                   │ │
+│ │  ┌──────────┐  ┌──────────────────────────────────┐               │ │
+│ │  │PostgreSQL│  │  Redis                           │               │ │
+│ │  │ :5432    │  │  :6379                           │               │ │
+│ │  │ pgvector │  │  Job state + 24hr report cache   │               │ │
+│ │  └──────────┘  └──────────────────────────────────┘               │ │
+│ └───────────────────────────────────────────────────────────────────┘ │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -174,7 +195,7 @@ Computes the overall score programmatically, then calls Ollama to write the exec
 
 - **Amazon scraping**: Amazon actively blocks scrapers. If you see CAPTCHA warnings in logs, the pipeline will continue with other sources. Consider using a residential proxy or increasing delays.
 - **YouTube**: Optional. Requires a free Google API key. Daily quota is 10,000 units (sufficient for ~50 product searches).
-- **Ollama speed**: Analysis time depends heavily on your hardware. On an M2 MacBook, a full analysis takes ~3–8 minutes. On a machine without a GPU it may take 15–30 minutes.
+- **Ollama speed**: Ollama must be run **natively on macOS**, not within Docker. Docker Desktop on Mac runs in a Linux VM without access to Apple Silicon GPUs, which causes extreme slowdowns natively. Once running natively, analysis takes ~3–8 minutes.
 - **Clustering**: Requires at least 10 reviews. Very niche products with few reviews will not have theme clusters.
 - **Reddit**: Must have valid Reddit API credentials. Rate-limited to ~60 requests/minute in read-only mode.
 
@@ -182,17 +203,17 @@ Computes the overall score programmatically, then calls Ollama to write the exec
 
 ## Troubleshooting
 
-### "Ollama did not start in time"
+### "Local Ollama is not responding"
+Make sure the Ollama native app is installed and running on your Mac. You should see the Ollama icon in your Mac menu bar.
+Alternatively, start it manually:
 ```bash
-docker logs reviewlens_ollama
-# If container is running but not healthy, wait longer:
-docker exec reviewlens_ollama ollama pull mistral
+ollama serve
 ```
 
 ### "Backend is unhealthy"
 ```bash
 docker logs reviewlens_backend
-# Common cause: Ollama not ready. Wait 30-60s after init.sh completes.
+# Common cause: Docker cannot reach native Ollama. Ensure your .env has OLLAMA_BASE_URL=http://host.docker.internal:11434
 ```
 
 ### Amazon returns CAPTCHA
@@ -213,7 +234,7 @@ Mistral requires ~6–8 GB RAM. Close other applications. If you have less than 
 ```
 OLLAMA_MODEL=llama3.2:1b
 ```
-Then re-run `docker exec reviewlens_ollama ollama pull llama3.2:1b`.
+Then re-run `ollama pull llama3.2:1b` natively in your terminal.
 
 ### Reset everything
 ```bash
@@ -225,8 +246,15 @@ docker compose down -v  # removes all volumes including cached data
 
 ## Development
 
-To run backend locally (outside Docker):
+If you want to modify the code, it is best to run the frontend and backend locally outside of Docker, while keeping the databases and Ollama running in Docker.
 
+**1. Start the required background services (Database, Redis):**
+```bash
+docker compose up -d postgres redis
+```
+*(Make sure the native Ollama app is running on your Mac)*
+
+**2. To run backend locally:**
 ```bash
 cd backend
 uv pip install -e .
@@ -234,8 +262,7 @@ playwright install chromium
 uvicorn api.main:app --reload
 ```
 
-To run frontend locally:
-
+**3. To run frontend locally:**
 ```bash
 cd frontend
 npm install
@@ -256,7 +283,7 @@ OLLAMA_MODEL=mistral       # default, good balance
 
 Pull the model first:
 ```bash
-docker exec reviewlens_ollama ollama pull llama3.2
+ollama pull llama3.2
 ```
 
 ---

@@ -1,20 +1,6 @@
 version: "3.9"
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: reviewlens_ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   postgres:
     image: pgvector/pgvector:pg16
     container_name: reviewlens_postgres
@@ -58,12 +44,10 @@ services:
     env_file:
       - .env
     environment:
-      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       DATABASE_URL: postgresql+asyncpg://reviewlens:reviewlens@postgres:5432/reviewlens
       REDIS_URL: redis://redis:6379
     depends_on:
-      ollama:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
@@ -90,6 +74,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  ollama_data:
   postgres_data:
   redis_data:

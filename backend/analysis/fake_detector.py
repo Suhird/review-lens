@@ -35,7 +35,11 @@ def _compute_burst_score(
     window_days: int = 3,
     burst_threshold: int = 10,
 ) -> dict[str, float]:
-    dated = [(r.id, r.date) for r in reviews if r.date is not None]
+    dated = []
+    for r in reviews:
+        if r.date is not None:
+            dt = r.date.replace(tzinfo=timezone.utc) if r.date.tzinfo is None else r.date
+            dated.append((r.id, dt))
     if not dated:
         return {r.id: 0.0 for r in reviews}
 
