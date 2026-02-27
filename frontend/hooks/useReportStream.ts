@@ -26,6 +26,8 @@ export interface ReportData {
   who_should_buy: string;
   who_should_skip: string;
   verdict: string;
+  rating_distribution?: Record<string, number>;
+  is_simulated?: boolean;
 }
 
 export interface AspectScore {
@@ -74,6 +76,7 @@ export function useReportStream(jobId: string) {
   const [report, setReport] = useState<ReportData | null>(null);
   const [progress, setProgress] = useState<ProgressEntry[]>([]);
   const [isComplete, setIsComplete] = useState(false);
+  const [isCancelled, setIsCancelled] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
@@ -101,7 +104,6 @@ export function useReportStream(jobId: string) {
             },
           ]);
         } else if (type === "partial") {
-          // Merge partial data
           setReport((prev) => ({
             ...((prev ?? {}) as ReportData),
             ...payload.data,
@@ -109,6 +111,9 @@ export function useReportStream(jobId: string) {
         } else if (type === "complete") {
           setReport(payload.data);
           setIsComplete(true);
+          es.close();
+        } else if (type === "cancelled") {
+          setIsCancelled(true);
           es.close();
         } else if (type === "error") {
           setError(payload.message || "An error occurred");
@@ -131,5 +136,18 @@ export function useReportStream(jobId: string) {
     };
   }, [jobId]);
 
-  return { report, progress, isComplete, error };
+  const cancel = async () => {
+    // Close the SSE stream immediately for instant UI feedback
+    esRef.current?.close();
+    setIsCancelled(true);
+    // Tell the backend to stop the pipeline
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      await fetch(`${apiUrl}/api/cancel/${jobId}`, { method: "POST" });
+    } catch {
+      // Ignore — UI is already showing cancelled state
+    }
+  };
+
+  return { report, progress, isComplete, isCancelled, error, cancel };
 }

@@ -64,15 +64,15 @@ def _extract_sku_from_search_page(html: str, query: str) -> Optional[str]:
 
 
 def _extract_sku_from_url(url: str) -> Optional[str]:
-    """Try to extract numeric SKU from a Best Buy URL."""
+    """Try to extract numeric or alphanumeric SKU from a Best Buy URL."""
     # New format: /product/{name}/{id} where id may be alphanumeric
     # Old format: /site/{name}/{sku}.p?skuId={sku}
     sku_match = re.search(r"[?&]skuId=(\d+)", url)
     if sku_match:
         return sku_match.group(1)
-    # Try last path segment if numeric
+    # Try last path segment
     last_segment = url.rstrip("/").split("/")[-1]
-    if last_segment.isdigit():
+    if last_segment and len(last_segment) > 4 and "." not in last_segment:
         return last_segment
     return None
 
@@ -120,64 +120,63 @@ def _fetch_reviews_sync(sku: str, max_pages: int = 3) -> list[RawReview]:
     return reviews
 
 
-async def _fetch_reviews_via_api(sku: str, max_pages: int = 3) -> list[RawReview]:
-    """Use Best Buy's UGC reviews API to fetch reviews."""
+async def _fetch_reviews_via_api_playwright(context, sku: str, max_pages: int = 3) -> list[RawReview]:
+    """Use Best Buy's UGC reviews API to fetch reviews using the Playwright browser context."""
     reviews: list[RawReview] = []
-    headers = {
-        "Accept": "application/json",
-        "User-Agent": random.choice(USER_AGENTS),
-    }
+    headers = {"Accept": "application/json"}
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        for page_num in range(1, max_pages + 1):
-            params = {
-                "page": page_num,
-                "pageSize": 20,
-                "productId": sku,
-                "sort": "MOST_HELPFUL",
-            }
-            try:
-                resp = await client.get(BB_UGC_API, params=params, headers=headers)
-                if resp.status_code != 200:
-                    break
-                data = resp.json()
-                items = data.get("reviews", [])
-                if not items:
-                    break
-
-                for item in items:
-                    text = item.get("reviewText", "") or item.get("text", "")
-                    if not text:
-                        continue
-                    rating_val = item.get("rating")
-                    rating: Optional[float] = float(rating_val) if rating_val else None
-
-                    submitted = item.get("submissionTime") or item.get("reviewSubmissionTime")
-                    review_date: Optional[datetime] = None
-                    if submitted:
-                        try:
-                            review_date = datetime.fromisoformat(str(submitted).replace("Z", "+00:00"))
-                        except (ValueError, TypeError):
-                            pass
-
-                    verified = bool(item.get("verifiedPurchase", False))
-                    helpful_votes = int(item.get("positiveFeedbackCount", 0) or 0)
-                    reviewer = item.get("userNickname") or item.get("authorId")
-
-                    review_id = _make_review_id(text, str(reviewer) if reviewer else None)
-                    reviews.append(RawReview(
-                        id=review_id,
-                        source="bestbuy",
-                        text=text[:2000],
-                        rating=rating,
-                        date=review_date,
-                        verified_purchase=verified,
-                        helpful_votes=helpful_votes,
-                        reviewer_id=str(reviewer) if reviewer else None,
-                    ))
-            except Exception as e:
-                logger.warning(f"Best Buy UGC API page {page_num} failed: {e}")
+    for page_num in range(1, max_pages + 1):
+        params = {
+            "page": str(page_num),
+            "pageSize": "20",
+            "productId": sku,
+            "sort": "MOST_HELPFUL",
+        }
+        try:
+            query_string = "&".join(f"{k}={v}" for k, v in params.items())
+            url = f"{BB_UGC_API}?{query_string}"
+            resp = await context.request.get(url, headers=headers)
+            if not resp.ok:
+                logger.warning(f"Best Buy UGC API page {page_num} returned {resp.status}")
                 break
+            data = await resp.json()
+            items = data.get("reviews", [])
+            if not items:
+                break
+
+            for item in items:
+                text = item.get("reviewText", "") or item.get("text", "")
+                if not text:
+                    continue
+                rating_val = item.get("rating")
+                rating: Optional[float] = float(rating_val) if rating_val else None
+
+                submitted = item.get("submissionTime") or item.get("reviewSubmissionTime")
+                review_date: Optional[datetime] = None
+                if submitted:
+                    try:
+                        review_date = datetime.fromisoformat(str(submitted).replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        pass
+
+                verified = bool(item.get("verifiedPurchase", False))
+                helpful_votes = int(item.get("positiveFeedbackCount", 0) or 0)
+                reviewer = item.get("userNickname") or item.get("authorId")
+
+                review_id = _make_review_id(text, str(reviewer) if reviewer else None)
+                reviews.append(RawReview(
+                    id=review_id,
+                    source="bestbuy",
+                    text=text[:2000],
+                    rating=rating,
+                    date=review_date,
+                    verified_purchase=verified,
+                    helpful_votes=helpful_votes,
+                    reviewer_id=str(reviewer) if reviewer else None,
+                ))
+        except Exception as e:
+            logger.warning(f"Best Buy UGC Playwright API page {page_num} failed: {repr(e)}")
+            break
 
     return reviews
 
@@ -266,7 +265,7 @@ async def _scrape_with_playwright(query: str) -> list[RawReview]:
     async with async_playwright() as p:
         browser: Browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-http2", "--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
             user_agent=random.choice(USER_AGENTS),
@@ -287,44 +286,44 @@ async def _scrape_with_playwright(query: str) -> list[RawReview]:
             await page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
             await asyncio.sleep(_random_delay())
 
+            # Check for international splash page and click US
+            us_link = page.locator("a.us-link")
+            if await us_link.count() > 0 and await us_link.is_visible():
+                logger.info("Best Buy Playwright: Clicking US link on splash page")
+                await us_link.click()
+                await page.wait_for_load_state("domcontentloaded")
+                await asyncio.sleep(_random_delay())
+
             content = await page.content()
             soup = BeautifulSoup(content, "lxml")
 
-            # Extract SKU directly from search results page HTML
-            sku = _extract_sku_from_search_page(content, query)
+            # Extract product_link First
             product_link: Optional[str] = None
+            for sel in ["a.product-list-item-link", "h4.sku-title a", "h2.sku-title a", "h4.product-title a", "a.product-image-link"]:
+                first_a = soup.select_one(sel)
+                if first_a:
+                    href = first_a.get("href", "")
+                    if href.startswith("https://www.bestbuy.com") or href.startswith("/"):
+                        product_link = href if href.startswith("http") else "https://www.bestbuy.com" + href
+                        break
 
+            # Try to get SKU from link first
+            sku = None
+            if product_link:
+                sku = _extract_sku_from_url(product_link)
             if not sku:
-                # Fallback: get product link and extract SKU from its URL
-                for sel in ["a.product-list-item-link", "h4.sku-title a", "h2.sku-title a"]:
-                    for a in soup.select(sel):
-                        href = a.get("href", "")
-                        if href.startswith("https://www.bestbuy.com") or href.startswith("/"):
-                            product_link = href if href.startswith("http") else "https://www.bestbuy.com" + href
-                            sku = _extract_sku_from_url(product_link)
-                            break
-                    if sku or product_link:
-                        break
-
-            # If we don't have a product link yet but we have a SKU, we need the link for the fallback
-            if sku and not product_link:
-                for sel in ["a.product-list-item-link", "h4.sku-title a", "h2.sku-title a"]:
-                    for a in soup.select(sel):
-                        href = a.get("href", "")
-                        if sku in href:
-                            product_link = href if href.startswith("http") else "https://www.bestbuy.com" + href
-                            break
-                    if product_link:
-                        break
+                sku = _extract_sku_from_search_page(content, query)
 
             if sku:
-                logger.info(f"Best Buy: using UGC API for SKU {sku}")
-                api_reviews = await _fetch_reviews_via_api(sku, max_pages=3)
+                logger.info(f"Best Buy: using UGC Playwright API for SKU {sku}")
+                api_reviews = await _fetch_reviews_via_api_playwright(context, sku, max_pages=3)
                 if api_reviews:
                     return api_reviews
-                logger.warning(f"Best Buy: UGC API returned no reviews for SKU {sku}")
+                logger.warning(f"Best Buy: UGC Playwright API returned no reviews for SKU {sku}")
             else:
                 logger.warning("Best Buy: could not extract SKU from search results")
+                
+            logger.warning(f"Extracted product link: {product_link}")
             
             # Robust Fallback: Navigate to the product page and scrape HTML
             if product_link:

@@ -39,6 +39,21 @@ class ReviewLensState(TypedDict):
     final_report: FinalReport
     errors: Annotated[list[str], operator.add]
 
+async def _is_cancelled(job_id: str) -> bool:
+    """Return True if the job has been requested to cancel."""
+    from cache.redis_manager import get_job_data
+    job = await get_job_data(job_id)
+    return job is not None and job.get("status") in ("cancelling", "cancelled")
+
+
+async def _mark_cancelled(job_id: str) -> None:
+    """Stamp the job as cancelled in Redis."""
+    from cache.redis_manager import get_job_data, set_job_data
+    job = await get_job_data(job_id) or {}
+    job["status"] = "cancelled"
+    await set_job_data(job_id, job)
+
+
 async def _flush_progress(job_id: str, query: str, message=None, errors: list[str] | None = None):
     """Append a single progress message to the job in Redis (safe for parallel nodes)."""
     from cache.redis_manager import get_job_data, set_job_data
@@ -82,11 +97,11 @@ async def enrich_query_node(state: ReviewLensState) -> dict:
 
 async def scraper_node(state: ReviewLensState) -> dict:
     from scrapers.amazon import scrape_amazon
-    from scrapers.reddit import scrape_reddit
-    from scrapers.bestbuy import scrape_bestbuy
+    from scrapers.google import scrape_google
     from scrapers.youtube import scrape_youtube
     from cache.redis_manager import get_cached_reviews, cache_reviews, normalize_name
     from db.database import store_reviews, upsert_product
+    from simulated_data.loader import get_simulated_reviews
 
     query = state["query"]
     enriched = state.get("enriched_queries", [query])
@@ -96,6 +111,22 @@ async def scraper_node(state: ReviewLensState) -> dict:
     product_image: Optional[str] = None
 
     norm_query = normalize_name(query)
+
+    # Check for simulated reviews (bypasses real scraping for demo products)
+    sim = get_simulated_reviews(query)
+    if sim:
+        await _flush_progress(
+            state["job_id"], query,
+            {"task": "scrape", "status": "complete", "message": f"Loaded {len(sim['reviews'])} simulated reviews for demo"},
+        )
+        result: dict = {
+            "raw_reviews": sim["reviews"],
+            "cleaned_reviews": sim["reviews"],
+            "errors": [],
+        }
+        if sim.get("image_url"):
+            result["product_image"] = sim["image_url"]
+        return result
 
     if use_cache:
         cached = await get_cached_reviews(norm_query)
@@ -115,8 +146,7 @@ async def scraper_node(state: ReviewLensState) -> dict:
 
         scrapers = [
             scrape_amazon(term),
-            scrape_bestbuy(term),
-            scrape_reddit(term),
+            scrape_google(term),
             scrape_youtube(term),
         ]
         results = await asyncio.gather(*scrapers, return_exceptions=True)
@@ -169,6 +199,10 @@ async def analysis_node(state: ReviewLensState) -> dict:
     product_image = state.get("product_image")
     new_errors: list[str] = []
 
+    if await _is_cancelled(state["job_id"]):
+        await _mark_cancelled(state["job_id"])
+        return {"errors": ["Analysis cancelled by user"]}
+
     if not reviews:
         empty_report = FinalReport(
             product_name=query,
@@ -203,6 +237,10 @@ async def analysis_node(state: ReviewLensState) -> dict:
         reviews_with_fake = reviews
 
     # Fake detection
+    if await _is_cancelled(state["job_id"]):
+        await _mark_cancelled(state["job_id"])
+        return {"aspect_scores": aspect_scores, "errors": new_errors + ["Analysis cancelled by user"]}
+
     await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Detecting fake reviews..."})
     try:
         fake_report, reviews_scored = detect_fake_reviews(reviews_with_fake)
@@ -219,6 +257,10 @@ async def analysis_node(state: ReviewLensState) -> dict:
         reviews_scored = reviews
 
     # Drift detection
+    if await _is_cancelled(state["job_id"]):
+        await _mark_cancelled(state["job_id"])
+        return {"aspect_scores": aspect_scores, "fake_report": fake_report, "errors": new_errors + ["Analysis cancelled by user"]}
+
     await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Analyzing sentiment drift over time..."})
     try:
         drift_report = detect_drift(reviews_scored)
@@ -228,6 +270,10 @@ async def analysis_node(state: ReviewLensState) -> dict:
         drift_report = DriftReport(monthly_sentiment=[], change_points=[], trend="stable")
 
     # Clustering
+    if await _is_cancelled(state["job_id"]):
+        await _mark_cancelled(state["job_id"])
+        return {"aspect_scores": aspect_scores, "fake_report": fake_report, "drift_report": drift_report, "errors": new_errors + ["Analysis cancelled by user"]}
+
     await _flush_progress(state["job_id"], query, {"task": "analysis", "status": "running", "message": "Clustering reviews by theme..."})
     try:
         clusters = await cluster_reviews(reviews_scored)
@@ -252,6 +298,10 @@ async def synthesis_node(state: ReviewLensState) -> dict:
     from agents.synthesis_agent import synthesize_report
 
     new_errors: list[str] = []
+
+    if await _is_cancelled(state["job_id"]):
+        await _mark_cancelled(state["job_id"])
+        return {"errors": ["Analysis cancelled by user"]}
 
     await _flush_progress(state["job_id"], state["query"], {"task": "synthesis", "status": "running", "message": "Synthesizing final report..."})
     try:

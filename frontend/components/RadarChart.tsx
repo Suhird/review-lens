@@ -27,7 +27,7 @@ export default function RadarChart({ aspects }: Props) {
   const filtered = aspects.filter(
     (a) =>
       a.mention_count > 3 &&
-      RADAR_ASPECTS.includes(a.aspect.toLowerCase())
+      RADAR_ASPECTS.includes((a.aspect || "").toLowerCase())
   );
 
   if (filtered.length < 3) {
@@ -43,7 +43,7 @@ export default function RadarChart({ aspects }: Props) {
   }
 
   const chartData = (filtered.length >= 3 ? filtered : aspects.slice(0, 8)).map((a) => ({
-    aspect: a.aspect
+    aspect: (a.aspect || "")
       .split(" ")
       .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" "),

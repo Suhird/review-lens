@@ -87,6 +87,13 @@ async def _run_pipeline(job_id: str, query: str, use_cache: bool = True) -> None
         report: FinalReport = final_state.get("final_report")
         errors = final_state.get("errors", [])
 
+        # Check if cancelled during pipeline execution
+        existing_job = await get_job_data(job_id) or {}
+        if existing_job.get("status") in ("cancelled", "cancelling"):
+            existing_job["status"] = "cancelled"
+            await set_job_data(job_id, existing_job)
+            return
+
         if report is None:
             raise ValueError("Pipeline completed without generating a report")
 
@@ -192,6 +199,10 @@ async def _sse_generator(job_id: str) -> AsyncGenerator[str, None]:
                 yield _sse_event("complete", {"data": report_data})
             return
 
+        if status in ("cancelled", "cancelling"):
+            yield _sse_event("cancelled", {"message": "Analysis was stopped"})
+            return
+
         if status == "error":
             errors = job.get("errors", ["Unknown error"])
             yield _sse_event("error", {"message": errors[-1] if errors else "Unknown error"})
@@ -234,6 +245,26 @@ async def get_report(job_id: str) -> FinalReport:
         raise HTTPException(status_code=404, detail="Report data missing")
 
     return FinalReport.model_validate(report_data)
+
+
+@app.post("/api/cancel/{job_id}")
+async def cancel_job(job_id: str) -> dict:
+    """Request cancellation of a running pipeline job."""
+    job = await get_job_data(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "running":
+        return {"status": job.get("status"), "message": "Job is not running"}
+    job["status"] = "cancelling"
+    await set_job_data(job_id, job)
+    return {"status": "cancelling", "message": "Cancellation requested"}
+
+
+@app.get("/api/simulated-products")
+async def get_simulated_products() -> dict:
+    """Return the list of product names that have simulated review data."""
+    from simulated_data.loader import get_all_simulated_products
+    return {"products": get_all_simulated_products()}
 
 
 @app.get("/api/health", response_model=HealthResponse)

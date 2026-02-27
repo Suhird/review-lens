@@ -7,7 +7,13 @@ interface Props {
 }
 
 export default function VerdictSection({ report }: Props) {
-  const { executive_summary, who_should_buy, who_should_skip, verdict, overall_score } = report;
+  const { 
+    executive_summary = "", 
+    who_should_buy = "", 
+    who_should_skip = "", 
+    verdict = "", 
+    overall_score = 0 
+  } = report;
 
   const scoreDesc =
     overall_score >= 8
@@ -18,7 +24,8 @@ export default function VerdictSection({ report }: Props) {
       ? { label: "Average", color: "text-yellow-600", bg: "bg-yellow-50 border-yellow-200" }
       : { label: "Below Average", color: "text-red-600", bg: "bg-red-50 border-red-200" };
 
-  const formatBullets = (text: string) => {
+  const formatBullets = (text: string | null) => {
+    if (!text) return null;
     return text.split("\n").filter((l) => l.trim()).map((line, i) => (
       <li key={i} className="flex items-start gap-2">
         <span className="mt-1 text-slate-400">•</span>
@@ -27,7 +34,7 @@ export default function VerdictSection({ report }: Props) {
     ));
   };
 
-  const summaryParagraphs = executive_summary
+  const summaryParagraphs = (executive_summary || "")
     .split(/\n\n+/)
     .filter((p) => p.trim().length > 0);
 

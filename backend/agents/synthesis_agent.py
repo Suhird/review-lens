@@ -223,6 +223,14 @@ async def synthesize_report(state: "ReviewLensState") -> FinalReport:
     product_image = state.get("product_image")
 
     sources_used = list({r.source for r in reviews})
+
+    # Pre-compute rating distribution from ALL reviews (not just featured)
+    rating_distribution: dict[str, int] = {"1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
+    for r in reviews:
+        if r.rating is not None:
+            star = str(min(5, max(1, round(r.rating))))
+            rating_distribution[star] = rating_distribution.get(star, 0) + 1
+
     overall_score = _compute_overall_score(
         reviews,
         fake_report.fake_percentage if fake_report else 0.0,
@@ -279,4 +287,5 @@ async def synthesize_report(state: "ReviewLensState") -> FinalReport:
         who_should_buy=who_should_buy,
         who_should_skip=who_should_skip,
         verdict=verdict,
+        rating_distribution=rating_distribution,
     )

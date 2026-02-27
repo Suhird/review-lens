@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 
 class RawReview(BaseModel):
-    id: str
-    source: str  # "amazon" | "reddit" | "bestbuy" | "youtube"
+    id: str    # We use Google Search to get hits from costco, walmart, bestbuy, etc.
+    source: str  # "amazon" | "reddit" | "bestbuy" | "youtube" | "costco" | "walmart"
     text: str
     rating: Optional[float] = None
     date: Optional[datetime] = None
@@ -63,6 +63,8 @@ class FinalReport(BaseModel):
     who_should_buy: str
     who_should_skip: str
     verdict: str
+    rating_distribution: dict = {}
+    is_simulated: bool = False
 
 
 class AnalyzeRequest(BaseModel):

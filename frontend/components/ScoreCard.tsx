@@ -45,7 +45,12 @@ function StarRating({ score }: { score: number }) {
 }
 
 export default function ScoreCard({ report }: Props) {
-  const { overall_score, sentiment_breakdown, sources_used, fake_report } = report;
+  const { 
+    overall_score = 0, 
+    sentiment_breakdown = {}, 
+    sources_used = [], 
+    fake_report = { risk_level: "low" as "low" | "medium" | "high", fake_percentage: 0, flagged_count: 0, total_reviews: 0, flagged_ids: [] }
+  } = report;
 
   const scoreColor =
     overall_score >= 8
@@ -57,7 +62,13 @@ export default function ScoreCard({ report }: Props) {
       : "text-red-600";
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 p-6">
+    <div className="bg-white rounded-xl border border-slate-200 p-6 relative">
+      {report.is_simulated && (
+        <div className="absolute top-4 right-4 bg-purple-100 text-purple-700 border border-purple-200 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-sm">
+          <div className="w-1.5 h-1.5 bg-purple-500 rounded-full animate-pulse" />
+          Simulated Data
+        </div>
+      )}
       <div className="flex flex-wrap gap-8 items-start">
         {/* Score */}
         <div className="text-center">

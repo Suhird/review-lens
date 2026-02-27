@@ -25,6 +25,7 @@ Type any product name and ReviewLens automatically:
 - **Git**
 - Reddit API credentials (free, 2 minutes to get)
 - YouTube Data API key (optional, free)
+- Google Custom Search API key and Engine ID (CX) (optional, free - required for Costco, Walmart, BestBuy)
 
 ---
 
@@ -54,7 +55,18 @@ REDDIT_CLIENT_SECRET=your_reddit_client_secret
 
 See [How to get Reddit credentials](#how-to-get-reddit-api-credentials) below.
 
-### Step 4: Run the initialization script (First Time Only)
+### Step 4: Fill in your Google Search API and CX (optional)
+
+If you want to use the Google Custom Search scraper to fetch reviews from BestBuy, Walmart, and Costco, open `.env` and fill in:
+
+```
+GOOGLE_SEARCH_API_KEY=your_google_search_api_key
+GOOGLE_SEARCH_CX=your_google_search_engine_id
+```
+
+See [How to get a Google Search API key and CX](#how-to-get-a-google-search-api-key-and-cx-optional) below.
+
+### Step 5: Run the initialization script (First Time Only)
 
 ```bash
 chmod +x init.sh
@@ -63,7 +75,7 @@ chmod +x init.sh
 
 This will:
 1. Verify native Ollama is running on your Mac
-2. Pull the Mistral model (~4 GB, one-time download)
+2. Pull the llama3.2 model (~4 GB, one-time download)
 3. Start all Docker services (PostgreSQL, Redis, backend, frontend)
 
 ### Step 5: Starting the Project (Daily Use)
@@ -114,6 +126,27 @@ If you skip this step, YouTube reviews will not be included but everything else 
 
 ---
 
+## How to get a Google Search API key and CX (optional)
+
+We use Google Custom Search API to pull results (reviews) from sites like Costco, BestBuy, and Walmart, which are notoriously difficult to scrape directly.
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com)
+2. Create a new project (or use an existing one)
+3. Navigate to **APIs & Services → Enable APIs**
+4. Search for and enable **"Custom Search API"**
+5. Go to **APIs & Services → Credentials**
+6. Click **"Create Credentials" → "API key"** and copy the key into `.env` as `GOOGLE_SEARCH_API_KEY`
+7. Go to the [Programmable Search Engine Control Panel](https://programmablesearchengine.google.com/controlpanel/create)
+8. Click **Add** to create a new search engine.
+9. Under **What to search**, select "Search specific sites or pages"
+10. Add the domains: `costco.com`, `bestbuy.com`, and `walmart.com`
+11. Click **Create**
+12. Check the created Search Engine settings and copy the **Search engine ID** into your `.env` as `GOOGLE_SEARCH_CX`
+
+If you skip this step, the Google Search Scraper will be ignored.
+
+---
+
 ## Architecture
 
 ```text
@@ -121,15 +154,15 @@ If you skip this step, YouTube reviews will not be included but everything else 
 │                              macOS Host                               │
 │                                                                       │
 │  ┌──────────┐                                                         │
-│  │ Ollama   │                                                         │
-│  │ :11434   │◀──────────────┐                                         │
-│  │ (Native) │               │                                         │
-│  └──────────┘               │                                         │
-│                             │                                         │
-│ ┌───────────────────────────┼───────────────────────────────────────┐ │
-│ │                     Docker Compose                                │ │
-│ │                           │                                       │ │
-│ │  ┌──────────┐    ┌────────┴────────────────────────────────────┐  │ │
+│  │ Ollama   │◀───── RAG Prompt / Generation ──────┐                   │
+│  │ :11434   │                                     │                   │
+│  │ (Native) │─────────────────────────────────────┤                   │
+│  └──────────┘                                     │                   │
+│                             │                     │                   │
+│ ┌───────────────────────────┼─────────────────────┼─────────────────┐ │
+│ │                     Docker Compose              │                 │ │
+│ │                           │                     │                 │ │
+│ │  ┌──────────┐    ┌────────┴─────────────────────┴──────────────┐  │ │
 │ │  │          │    │              FastAPI Backend                │  │ │
 │ │  │  Next.js │    │                                             │  │ │
 │ │  │ Frontend │───▶│  POST /api/analyze  →  LangGraph Pipeline   │  │ │
@@ -153,14 +186,16 @@ If you skip this step, YouTube reviews will not be included but everything else 
 │ │                  │  │       │                             │    │  │ │
 │ │                  │  │       ▼                             │    │  │ │
 │ │                  │  │  synthesis_node (LLM summary)       │    │  │ │
-│ │                  │  └─────────────────────────────────────┘    │  │ │ 
-│ │                  └─────────────────────────────────────────────┘  │ │
-│ │                                                                   │ │
-│ │  ┌──────────┐  ┌──────────────────────────────────┐               │ │
-│ │  │PostgreSQL│  │  Redis                           │               │ │
-│ │  │ :5432    │  │  :6379                           │               │ │
-│ │  │ pgvector │  │  Job state + 24hr report cache   │               │ │
-│ │  └──────────┘  └──────────────────────────────────┘               │ │
+│ │                  │  └───────────────────▲─────────────────┘    │  │ │ 
+│ │                  └──────────────────────┼──────────────────────┘  │ │
+│ │                   Retrieve Context (RAG)│                         │ │
+│ │  ┌──────────┐                           │                         │ │
+│ │  │PostgreSQL│───────────────────────────┘                         │ │
+│ │  │ :5432    │  ┌──────────────────────────────────┐               │ │
+│ │  │ pgvector │  │  Redis                           │               │ │
+│ │  └──────────┘  │  :6379                           │               │ │
+│ │                │  Job state + 24hr report cache   │               │ │
+│ │                └──────────────────────────────────┘               │ │
 │ └───────────────────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────────────┘
 ```

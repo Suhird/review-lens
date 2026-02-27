@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     reddit_client_secret: str = ""
     reddit_user_agent: str = "ReviewLens/1.0"
     youtube_api_key: str = ""
+    google_search_api_key: str = ""
+    google_search_cx: str = ""
 
     class Config:
         env_file = ".env"

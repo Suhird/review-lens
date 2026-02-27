@@ -18,7 +18,7 @@ export default function ReportPage({
   params: { jobId: string };
 }) {
   const { jobId } = params;
-  const { report, progress, isComplete, error } = useReportStream(jobId);
+  const { report, progress, isComplete, isCancelled, error, cancel } = useReportStream(jobId);
   const router = useRouter();
   const [isRefreshing, setIsRefreshing] = useState(false);
 
@@ -45,6 +45,28 @@ export default function ReportPage({
       setIsRefreshing(false);
     }
   };
+
+  if (isCancelled) {
+    return (
+      <div className="max-w-2xl mx-auto py-16 text-center">
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-8">
+          <div className="w-12 h-12 rounded-full bg-slate-200 flex items-center justify-center mx-auto mb-4">
+            <svg className="w-6 h-6 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-semibold text-slate-800 mb-2">Analysis stopped</h2>
+          <p className="text-slate-600 mb-6">You stopped the analysis before it completed.</p>
+          <a
+            href="/"
+            className="inline-block px-6 py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors"
+          >
+            New search
+          </a>
+        </div>
+      </div>
+    );
+  }
 
   if (error) {
     return (
@@ -89,8 +111,8 @@ export default function ReportPage({
             </h1>
             {report && (
               <p className="text-slate-600 mt-1">
-                {report.total_reviews_analyzed} reviews analyzed from{" "}
-                {report.sources_used.join(", ")}
+                {report.total_reviews_analyzed ?? 0} reviews analyzed from{" "}
+                {(report.sources_used || []).join(", ")}
               </p>
             )}
           </div>
@@ -117,9 +139,22 @@ export default function ReportPage({
         )}
       </div>
 
-      {/* Progress stream — always shown while running */}
+      {/* Progress stream — shown while running */}
       {!isComplete && (
-        <ProgressStream progress={progress} />
+        <div className="space-y-3">
+          <ProgressStream progress={progress} />
+          <div className="flex justify-center">
+            <button
+              onClick={cancel}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-white border border-red-200 text-red-600 rounded-lg text-sm font-medium hover:bg-red-50 hover:border-red-300 transition-colors shadow-sm"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+              Stop analysis
+            </button>
+          </div>
+        </div>
       )}
 
       {/* Results render as data arrives */}
@@ -130,13 +165,13 @@ export default function ReportPage({
 
           {/* Charts row */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            {report.aspect_scores.length > 0 && (
+            {(report.aspect_scores?.length ?? 0) > 0 && (
               <div className="bg-white rounded-xl border border-slate-200 p-6">
                 <h2 className="text-lg font-semibold text-slate-900 mb-4">Aspect Scores</h2>
                 <RadarChart aspects={report.aspect_scores} />
               </div>
             )}
-            {report.drift_report.monthly_sentiment.length > 1 && (
+            {(report.drift_report?.monthly_sentiment?.length ?? 0) > 1 && (
               <div className="bg-white rounded-xl border border-slate-200 p-6">
                 <h2 className="text-lg font-semibold text-slate-900 mb-4">Sentiment Over Time</h2>
                 <SentimentTimeline
@@ -149,18 +184,15 @@ export default function ReportPage({
           </div>
 
           {/* Rating distribution */}
-          {report.total_reviews_analyzed > 0 && (
+          {report.rating_distribution && (
             <div className="bg-white rounded-xl border border-slate-200 p-6">
               <h2 className="text-lg font-semibold text-slate-900 mb-4">Rating Distribution</h2>
-              <RatingDistribution
-                reviews={report.featured_reviews}
-                fakeIds={report.fake_report.flagged_ids}
-              />
+              <RatingDistribution distribution={report.rating_distribution} />
             </div>
           )}
 
           {/* Theme clusters */}
-          {report.clusters.length > 0 && (
+          {(report.clusters?.length ?? 0) > 0 && (
             <div>
               <h2 className="text-xl font-semibold text-slate-900 mb-4">Review Themes</h2>
               <ThemeClusters clusters={report.clusters} />
@@ -168,7 +200,7 @@ export default function ReportPage({
           )}
 
           {/* Featured reviews */}
-          {report.featured_reviews.length > 0 && (
+          {(report.featured_reviews?.length ?? 0) > 0 && (
             <div>
               <h2 className="text-xl font-semibold text-slate-900 mb-4">Featured Reviews</h2>
               <FeaturedReviews reviews={report.featured_reviews} />
